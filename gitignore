@@ -1,0 +1,29 @@
+# ── Credentials ──────────────────────────────────────────────────────────────
+redcap_api_info.R
+.Renviron
+*.env
+secrets/
+
+# ── Data (never commit PHI) ───────────────────────────────────────────────────
+data/
+Input/
+Output/
+outputs/
+*.csv
+*.xlsx
+*.xls
+
+# ── R artifacts ───────────────────────────────────────────────────────────────
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# ── OS artifacts ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Rendered reports ──────────────────────────────────────────────────────────
+*.html
+*.pdf
+*.png

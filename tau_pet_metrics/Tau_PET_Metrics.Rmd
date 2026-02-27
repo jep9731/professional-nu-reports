@@ -1,0 +1,512 @@
+---
+title: "Tau PET Metrics"
+date: "Compiled on: `r format(Sys.time(), '%m/%d/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    self_contained: true
+    df_print: paged
+    keep_md: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# ── Setup ─────────────────────────────────────────────────────────────────────
+rm(list = ls())
+
+library(tidyverse)
+library(redcapAPI)
+library(writexl)
+library(readxl)
+library(janitor)
+library(knitr)
+library(scales)
+library(here)
+if ("plyr"    %in% (.packages())) { detach("package:plyr") }
+if ("reshape" %in% (.packages())) { detach("package:reshape") }
+
+# ── Credentials ───────────────────────────────────────────────────────────────
+# Option A: source a local (gitignored) credentials file
+# source("redcap_api_info.R")
+
+# Option B: read from environment variables (recommended for servers)
+# url           <- Sys.getenv("REDCAP_URL")
+# imaging_token <- Sys.getenv("REDCAP_IMAGING_TOKEN")
+# dr_token      <- Sys.getenv("REDCAP_DR_TOKEN")
+
+# ── Output Directory ──────────────────────────────────────────────────────────
+output_loc <- here("tau_pet_metrics", "Output")
+if (!dir.exists(output_loc)) dir.create(output_loc, recursive = TRUE)
+
+# ── Data Request Folder (optional) ────────────────────────────────────────────
+# If your team uses a REDCap-based data request system, set dr_id to the
+# record ID for this request and uncomment the block below.
+#
+# dr_id <- NULL  # e.g., 1507
+#
+# if (!is.null(dr_id)) {
+#   formData <- list("token" = dr_token, content = "record", format = "csv",
+#                    type = "flat", "records[0]" = dr_id, returnFormat = "csv")
+#   fields <- c("record_id", "rqst_file_name")
+#   forms <- NULL; events <- NULL
+#   load_fields_forms_events(fields, forms, events)
+#   response       <- httr::POST(url, body = formData, encode = "form")
+#   dr_filename    <- httr::content(response, col_types = cols(.default = "c"))
+#   data_request_name <- dr_filename$rqst_file_name[1]
+# }
+
+# ── REDCap: Data Dictionary ───────────────────────────────────────────────────
+formData <- list("token" = imaging_token, content = "metadata",
+                 format = "csv", returnFormat = "csv")
+response          <- httr::POST(url, body = formData, encode = "form")
+data_dict_imaging <- httr::content(response, col_types = cols(.default = "c")) %>%
+  mutate(loc_imaging = "imaging")
+
+# ── REDCap: Tau PET Records ───────────────────────────────────────────────────
+formData <- list(
+  "token"                = imaging_token,
+  content                = "record",
+  format                 = "csv",
+  type                   = "flat",
+  csvDelimiter           = "",
+  rawOrLabel             = "raw",
+  rawOrLabelHeaders      = "raw",
+  exportCheckboxLabel    = "false",
+  exportSurveyFields     = "true",
+  exportDataAccessGroups = "false",
+  returnFormat           = "csv"
+)
+
+fields <- c(
+  "global_id", "ptid", "case_num_tau_pet",
+  "study_affiliation_tau", "scan_occur_confirmation_tau", "tau_date",
+  "tau_read_researcherclinician",
+  "tau_read_researcher1", "tau_read_researcher_source1",
+  "tau_read_researcher2", "tau_read_researcher_source2",
+  "tau_clinical_read1",  "tau_clinical_read_source1",
+  "tau_clinical_read2",  "tau_clinical_read_source2",
+  "tau_clinical_read3",  "tau_clinical_read_source3",
+  "tau_clinical_read_consensus"
+)
+forms  <- NULL
+events <- NULL
+
+load_fields_forms_events(fields, forms, events)
+
+response       <- httr::POST(url, body = formData, encode = "form")
+redcap_imaging <- httr::content(response, col_types = cols(.default = "c"))
+
+# Save raw data freeze
+write.csv(redcap_imaging,
+          paste0(output_loc, "/REDCapImaging_Raw_DataFreeze_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+
+# ── Clean Data ────────────────────────────────────────────────────────────────
+df <- redcap_imaging %>%
+  select(-c(
+    redcap_event_name, redcap_repeat_instrument, redcap_repeat_instance,
+    tau_read_researcherclinician___888, tau_read_researcherclinician___995,
+    tau_read_researcherclinician___996, tau_read_researcherclinician___997,
+    tau_read_researcherclinician___998
+  )) %>%
+  mutate(ptid = str_remove(ptid, "^0+")) %>%
+  group_by(global_id) %>%
+  fill(ptid, case_num_tau_pet, .direction = "down") %>%
+  ungroup() %>%
+  # Filter to confirmed scans from ADRC Imaging Core or PPA study
+  filter(
+    scan_occur_confirmation_tau == 1 &
+      (study_affiliation_tau == "ADRC_IC" | study_affiliation_tau == "PPA")
+  ) %>%
+  arrange(ptid, tau_date) %>%
+  # Recode numeric read values to Positive/Negative
+  mutate(across(
+    c(tau_read_researcher1, tau_read_researcher2,
+      tau_clinical_read1, tau_clinical_read2,
+      tau_clinical_read3, tau_clinical_read_consensus),
+    ~ case_when(. == "1" ~ "Positive", . == "2" ~ "Negative", TRUE ~ NA_character_)
+  )) %>%
+  # Apply consensus read when raters disagree; otherwise use first read
+  rowwise() %>%
+  mutate(
+    tau_clinical_read_consensus = {
+      reads <- c_across(c(
+        tau_read_researcher1, tau_read_researcher2,
+        tau_clinical_read1, tau_clinical_read2, tau_clinical_read3
+      )) %>% na.omit()
+      if (length(unique(reads)) > 1) tau_clinical_read_consensus else reads[1]
+    }
+  ) %>%
+  ungroup()
+
+write.csv(df,
+          paste0(output_loc, "/TauPETMetrics_DataFreeze_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+
+# ── Reshape to Long Format ────────────────────────────────────────────────────
+reader_cols <- c("tau_read_researcher1", "tau_read_researcher2",
+                 "tau_clinical_read1", "tau_clinical_read2", "tau_clinical_read3")
+source_cols <- c("tau_read_researcher_source1", "tau_read_researcher_source2",
+                 "tau_clinical_read_source1", "tau_clinical_read_source2",
+                 "tau_clinical_read_source3")
+
+df_long <- df %>%
+  select(global_id, ptid, case_num_tau_pet, tau_date,
+         all_of(reader_cols), all_of(source_cols), tau_clinical_read_consensus) %>%
+  pivot_longer(cols = all_of(reader_cols), names_to = "reader", values_to = "read") %>%
+  mutate(
+    reader_type = case_when(
+      str_detect(reader, "researcher") ~ "Researcher",
+      str_detect(reader, "clinical")   ~ "Clinician",
+      TRUE                              ~ NA_character_
+    ),
+    source = case_when(
+      reader == "tau_read_researcher1"  ~ tau_read_researcher_source1,
+      reader == "tau_read_researcher2"  ~ tau_read_researcher_source2,
+      reader == "tau_clinical_read1"    ~ tau_clinical_read_source1,
+      reader == "tau_clinical_read2"    ~ tau_clinical_read_source2,
+      reader == "tau_clinical_read3"    ~ tau_clinical_read_source3,
+      TRUE                               ~ NA_character_
+    )
+  ) %>%
+  select(global_id, ptid, case_num_tau_pet, tau_date,
+         tau_clinical_read_consensus, reader, read, reader_type, source)
+
+write.csv(df_long,
+          paste0(output_loc, "/TauPETMetricsLong_DataFreeze_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+
+# ── Missing Reads ─────────────────────────────────────────────────────────────
+missing_all      <- df_long %>% filter(is.na(read))
+count_missing_all <- n_distinct(missing_all$global_id)
+
+missing_research <- df_long %>%
+  filter(reader_type == "Researcher") %>%
+  group_by(global_id, tau_date) %>%
+  filter(sum(!is.na(read)) < 2) %>%
+  ungroup() %>%
+  select(global_id, ptid, case_num_tau_pet, tau_date, source)
+count_missing_research <- n_distinct(missing_research$global_id)
+
+missing_clinician <- df_long %>%
+  filter(reader_type == "Clinician") %>%
+  group_by(global_id, tau_date) %>%
+  filter(sum(!is.na(read)) < 3) %>%
+  ungroup() %>%
+  select(global_id, ptid, case_num_tau_pet, tau_date, source)
+count_missing_clinician <- n_distinct(missing_clinician$global_id)
+
+write.csv(missing_research,
+          paste0(output_loc, "/TauPETMetricsMissing_DataFreeze_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+
+# ── Discrepancy Analysis ──────────────────────────────────────────────────────
+discrepancy_table <- df_long %>%
+  mutate(
+    read                       = trimws(as.character(read)),
+    tau_clinical_read_consensus = trimws(as.character(tau_clinical_read_consensus))
+  ) %>%
+  filter(!is.na(read) & read != "") %>%
+  group_by(global_id, ptid, tau_date) %>%
+  mutate(
+    discrepancy_flag = n_distinct(read) > 1,
+    effective_read   = if (first(discrepancy_flag)) {
+      rep(first(tau_clinical_read_consensus), n())
+    } else {
+      read
+    },
+    mode_value = if (first(discrepancy_flag)) {
+      value_counts <- table(read)
+      names(value_counts)[which.max(value_counts)][1]
+    } else {
+      NA_character_
+    },
+    is_this_reader_discrepant = if (first(discrepancy_flag)) read != mode_value else FALSE,
+    all_discrepant_readers    = if (first(discrepancy_flag)) {
+      paste(unique(reader[is_this_reader_discrepant]), collapse = ", ")
+    } else {
+      NA_character_
+    },
+    all_discrepant_sources    = if (first(discrepancy_flag)) {
+      paste(unique(source[is_this_reader_discrepant]), collapse = ", ")
+    } else {
+      NA_character_
+    },
+    discrepant_person = if_else(is_this_reader_discrepant, source, NA_character_)
+  ) %>%
+  ungroup() %>%
+  select(-mode_value)
+
+# Discrepancy output table
+discrepancy_table_out <- discrepancy_table %>%
+  filter(discrepancy_flag == TRUE) %>%
+  select(ptid, tau_date, source, read, tau_clinical_read_consensus) %>%
+  pivot_wider(names_from = source, values_from = read) %>%
+  select(ptid, everything())
+
+write.csv(discrepancy_table_out,
+          paste0(output_loc, "/Discrepancytable_DataFreeze_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+
+# ID pull for downstream QC
+discrepant_id_pull <- discrepancy_table %>%
+  filter(discrepancy_flag == TRUE) %>%
+  distinct(ptid, case_num_tau_pet, tau_date)
+
+write.csv(discrepant_id_pull,
+          paste0(output_loc, "/discrepant_id_pull_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+This report details the findings from Tau PET read quality control for all scans with research and clinical reads (ADRC Imaging Core and PPA study). It identifies the number of discrepant reads, which rater was discrepant, and provides graphical summaries.
+
+**Report Sections:**
+
+Tables: (1) Total reads including missing, (2) Missing reads by type, (3) Reads by source, (4) Overall discrepancy summary, (5) Discrepancy by reader type, (6) Discrepant reader counts, (7) Discrepant vs. non-discrepant frequency.
+
+Plots: (1) Overall read distribution, (2) Reads by reader type, (3) Discrepant vs. non-discrepant, (4) Discrepancy by reader type.
+
+---
+
+### Tables
+
+#### Table 1 — All Reads
+
+```{r table-1, echo=FALSE}
+read_summary_all <- df_long %>%
+  count(read, name = "count") %>%
+  mutate(
+    percent       = count / sum(count),
+    percent_label = scales::percent(percent, accuracy = 0.1)
+  )
+
+total_row <- read_summary_all %>%
+  summarise(read = "Total", count = sum(count, na.rm = TRUE), percent_label = "100%")
+
+read_summary_all %>%
+  bind_rows(total_row) %>%
+  select(read, count, percent_label) %>%
+  kable(col.names = c("Read", "Count", "Percentage"),
+        align     = c("l", "r", "r"),
+        caption   = "Summary of All Tau PET Scan Reads")
+
+write.csv(read_summary_all,
+          paste0(output_loc, "/TauPETMetrics_table1_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+#### Table 2 — Missing Reads by Reader Type
+
+```{r table-2, echo=FALSE}
+data.frame(
+  `Missing - Clinician`  = count_missing_clinician,
+  `Missing - Researcher` = count_missing_research
+) %>%
+  kable(col.names = c("Clinician Missing", "Researcher Missing"),
+        align     = c("c", "c"),
+        caption   = "Distinct Number of Missing Reads By Reader Type")
+```
+
+#### Table 3 — Reads by Reader Type
+
+```{r table-3, echo=FALSE}
+read_summary_by_type <- df_long %>%
+  count(reader_type, read, name = "count") %>%
+  group_by(reader_type) %>%
+  mutate(percent = count / sum(count),
+         percent_label = scales::percent(percent, accuracy = 0.1)) %>%
+  ungroup()
+
+read_summary_by_type %>%
+  select(reader_type, read, count, percent_label) %>%
+  kable(col.names = c("Reader Type", "Read", "Count", "Percentage"),
+        align     = c("l", "l", "r", "r"),
+        caption   = "Overall Tau PET Scan Reads by Reader Type")
+
+write.csv(read_summary_by_type,
+          paste0(output_loc, "/TauPETMetrics_table3_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+#### Table 4 — Overall Discrepancy Summary
+
+```{r table-4, echo=FALSE}
+discrepancy_summary <- discrepancy_table %>%
+  summarise(
+    total_scans      = n(),
+    discrepant_scans = sum(is_this_reader_discrepant, na.rm = TRUE),
+    percent_discrepant = discrepant_scans / total_scans
+  ) %>%
+  mutate(percent_label = scales::percent(percent_discrepant, accuracy = 0.1))
+
+discrepancy_summary %>%
+  select(total_scans, discrepant_scans, percent_label) %>%
+  kable(col.names = c("Total Reads", "Discrepant Reads", "Percentage Discrepant"),
+        align     = c("r", "r", "r"),
+        caption   = "Overall Number of Discrepant Tau PET Reads")
+
+write.csv(discrepancy_summary,
+          paste0(output_loc, "/TauPETMetrics_table4_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+#### Table 5 — Discrepancy by Reader Type
+
+```{r table-5, echo=FALSE}
+discrepancy_by_type <- discrepancy_table %>%
+  group_by(reader_type) %>%
+  summarise(
+    total_reads        = n(),
+    discrepant_reads   = sum(is_this_reader_discrepant, na.rm = TRUE),
+    percent_discrepant = discrepant_reads / total_reads
+  ) %>%
+  mutate(percent_label = scales::percent(percent_discrepant, accuracy = 0.1))
+
+discrepancy_by_type %>%
+  select(reader_type, total_reads, discrepant_reads, percent_label) %>%
+  kable(col.names = c("Reader Type", "Total Reads", "Discrepant Reads", "Percentage Discrepant"),
+        align     = c("l", "r", "r", "r"),
+        caption   = "Discrepant Reads by Reader Type")
+
+write.csv(discrepancy_by_type,
+          paste0(output_loc, "/TauPETMetrics_table5_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+#### Table 6 — Discrepant Reader Counts
+
+```{r table-6, echo=FALSE}
+multi_discrepancy_events <- discrepancy_table %>%
+  filter(is_this_reader_discrepant) %>%
+  group_by(global_id, ptid, tau_date) %>%
+  summarise(
+    n_discrepant_people          = n_distinct(source),
+    discrepant_sources_in_event  = paste(unique(source), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  filter(n_discrepant_people > 1)
+
+discrepant_reader_count <- discrepancy_table %>%
+  filter(is_this_reader_discrepant) %>%
+  mutate(person = coalesce(discrepant_person, source)) %>%
+  left_join(multi_discrepancy_events, by = c("global_id", "ptid", "tau_date")) %>%
+  group_by(person, reader_type) %>%
+  summarise(
+    times_discrepant              = n(),
+    times_multi_person_discrepant = sum(!is.na(n_discrepant_people)),
+    multi_person_discrepant_sources = paste(unique(na.omit(discrepant_sources_in_event)),
+                                            collapse = " | "),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(times_discrepant))
+
+discrepant_reader_count %>%
+  kable(
+    col.names = c("Person", "Reader Type", "Times Discrepant",
+                  "Times Multi-Person Discrepant", "Multi-Person Discrepant Sources"),
+    align   = c("l", "l", "c", "c", "c"),
+    caption = "Count of Times Each Reader Was Discrepant"
+  )
+
+write.csv(discrepant_reader_count,
+          paste0(output_loc, "/TauPETMetrics_table6_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+#### Table 7 — Discrepant vs. Non-Discrepant Frequency
+
+```{r table-7, echo=FALSE}
+comparison_summary <- data.frame(
+  Category = c("Discrepant", "Non-Discrepant"),
+  Count    = c(discrepancy_summary$discrepant_scans,
+               discrepancy_summary$total_scans - discrepancy_summary$discrepant_scans)
+) %>%
+  mutate(Percent = scales::percent(Count / sum(Count), accuracy = 0.1))
+
+comparison_summary %>%
+  kable(col.names = c("Category", "Count", "Percentage"),
+        align     = c("l", "r", "r"),
+        caption   = "Discrepant vs Non-Discrepant Reads of all Tau PET Reads")
+
+write.csv(comparison_summary,
+          paste0(output_loc, "/TauPETMetrics_table7_", Sys.Date(), ".csv"),
+          row.names = FALSE)
+```
+
+---
+
+### Plots
+
+#### Plot 1 — Overall Read Distribution
+
+```{r plot-1, fig.height=6, fig.width=8, echo=FALSE}
+ggplot(df_long, aes(x = read, fill = read)) +
+  geom_bar(position = "identity", width = 0.9, color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.3, color = "black", size = 6) +
+  labs(title = "Overall Tau PET Scan Read Distribution",
+       x = "Tau PET Read", y = "Count") +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "coral2")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+ggsave("overall_distribution.png", path = output_loc,
+       width = 7, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+#### Plot 2 — Reads by Reader Type
+
+```{r plot-2, fig.height=6, fig.width=8, echo=FALSE}
+ggplot(df_long, aes(x = reader_type, fill = read)) +
+  geom_bar(position = "dodge", width = 0.9, color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            position = position_dodge(width = 0.9),
+            vjust = -0.3, color = "black", size = 6) +
+  labs(title = "Overall Tau PET Scan Read Counts\nby Reader Type",
+       x = "Reader Type", y = "Count", fill = "Read") +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "coral2")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  theme_bw(base_size = 14)
+ggsave("overall_distribution_reader.png", path = output_loc,
+       width = 7, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+#### Plot 3 — Discrepant vs. Non-Discrepant
+
+```{r plot-3, fig.height=6, fig.width=8, echo=FALSE}
+ggplot(comparison_summary, aes(x = Category, y = Count, fill = Category)) +
+  geom_bar(stat = "identity", position = "identity", color = "black") +
+  geom_text(aes(label = Count), size = 6, vjust = -0.3) +
+  labs(title = "Frequency of Discrepant Scans Across All Readers\n(For Scans With A Read)",
+       y = "Frequency", x = "Category") +
+  scale_fill_manual(values = c("Discrepant" = "steelblue", "Non-Discrepant" = "coral2")) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "none")
+ggsave("discrepancy_comparison.png", path = output_loc,
+       width = 7, height = 5, units = "in", dpi = 300, bg = "white")
+```
+
+#### Plot 4 — Discrepancy by Reader Type
+
+```{r plot-4, fig.height=6, fig.width=8, echo=FALSE}
+ggplot(discrepancy_by_type, aes(x = reader_type)) +
+  geom_bar(aes(y = total_reads, fill = "Total Scans"),
+           stat = "identity", position = "identity", width = 0.7, color = "black") +
+  geom_bar(aes(y = discrepant_reads, fill = "Discrepant Reads"),
+           stat = "identity", position = "identity", width = 0.7, color = "black") +
+  geom_text(aes(y = total_reads, label = total_reads),
+            vjust = -0.5, size = 6) +
+  geom_text(aes(y = discrepant_reads, label = discrepant_reads),
+            vjust = -0.5, size = 6) +
+  labs(title = "Frequency of Discrepant Scans by Reader Type\n(For Scans With A Read)",
+       y = "Frequency", x = "Reader Type", fill = "Metric") +
+  scale_fill_manual(values = c("Total Scans" = "steelblue", "Discrepant Reads" = "coral2")) +
+  theme_bw(base_size = 16) +
+  expand_limits(y = max(discrepancy_by_type$total_reads) * 1.1)
+ggsave("discrepancy_comparison_by_source.png", path = output_loc,
+       width = 7, height = 5, units = "in", dpi = 300, bg = "white")
+```

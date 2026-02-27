@@ -1,0 +1,667 @@
+---
+title: "Imaging Report"
+output: html_document
+date: "`r Sys.Date()`"
+---
+
+<style type="text/css">
+  body { font-size: 14pt; }
+</style>
+
+```{r setup, include=FALSE}
+# ── Setup ─────────────────────────────────────────────────────────────────────
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+rm(list = ls())
+
+library(tidyverse)
+library(redcapAPI)
+library(writexl)
+library(readxl)
+library(janitor)
+library(gt)
+library(here)
+if ("plyr"    %in% (.packages())) { detach("package:plyr") }
+if ("reshape" %in% (.packages())) { detach("package:reshape") }
+
+# ── Credentials ───────────────────────────────────────────────────────────────
+# Option A: source a local (gitignored) credentials file
+# source("redcap_api_info.R")
+
+# Option B: read from environment variables (recommended for servers / cron)
+# url           <- Sys.getenv("REDCAP_URL")
+# imaging_token <- Sys.getenv("REDCAP_IMAGING_TOKEN")
+
+# ── REDCap: Data Dictionary ───────────────────────────────────────────────────
+formData <- list(
+  "token"        = imaging_token,
+  content        = "metadata",
+  format         = "csv",
+  returnFormat   = "csv"
+)
+response          <- httr::POST(url, body = formData, encode = "form")
+data_dict_imaging <- httr::content(response, col_types = cols(.default = "c")) %>%
+  mutate(loc_imaging = "imaging")
+
+# ── REDCap: Records ───────────────────────────────────────────────────────────
+formData <- list(
+  "token"                = imaging_token,
+  content                = "record",
+  format                 = "csv",
+  type                   = "flat",
+  csvDelimiter           = "",
+  rawOrLabel             = "raw",
+  rawOrLabelHeaders      = "raw",
+  exportCheckboxLabel    = "false",
+  exportSurveyFields     = "true",
+  exportDataAccessGroups = "false",
+  returnFormat           = "csv"
+)
+
+fields <- c(
+  "global_id", "ptid",
+  "mc_calcdx_visit_mri", "mc_calcdx_visit_amyloid",
+  "mc_calcdx_visit_tau", "mc_calcdx_visit_fdg",
+  "runsheet_selection",
+  "study_affiliation_mri", "mri_date", "scan_occur_confirmation_mri",
+  "study_affiliation_amyloid", "amyloid_date", "scan_occur_confirmation_amyloid",
+  "study_affiliation_tau", "tau_date", "scan_occur_confirmation_tau",
+  "study_affiliation_fdg", "fdg_date", "scan_occur_confirmation_fdg",
+  "flair_sequence_scanned", "t1_structural_sequence_scanned",
+  "t2_structural_sequence_scanned", "rsfmri_sequence_scanned",
+  "dif_sequence_scanned"
+)
+forms  <- NULL
+events <- NULL
+
+load_fields_forms_events(fields, forms, events)
+
+response        <- httr::POST(url, body = formData, encode = "form")
+redcap_imaging  <- httr::content(response, col_types = cols(.default = "c"))
+
+# ── Clean & Reshape ───────────────────────────────────────────────────────────
+df <- redcap_imaging %>%
+  select(
+    global_id, ptid,
+    mc_calcdx_visit_mri, mc_calcdx_visit_amyloid,
+    mc_calcdx_visit_tau, mc_calcdx_visit_fdg,
+    runsheet_selection___mri, runsheet_selection___amyloid,
+    runsheet_selection___tau, runsheet_selection___fdg,
+    study_affiliation_mri, scan_occur_confirmation_mri, mri_date,
+    study_affiliation_amyloid, scan_occur_confirmation_amyloid, amyloid_date,
+    study_affiliation_tau, scan_occur_confirmation_tau, tau_date,
+    study_affiliation_fdg, scan_occur_confirmation_fdg, fdg_date,
+    flair_sequence_scanned, t1_structural_sequence_scanned,
+    t2_structural_sequence_scanned, rsfmri_sequence_scanned,
+    dif_sequence_scanned
+  ) %>%
+  mutate(ptid = str_remove(ptid, "^0{6}")) %>%
+  group_by(global_id) %>%
+  fill(ptid, .direction = "down") %>%
+  ungroup() %>%
+  drop_na(c(
+    runsheet_selection___mri, runsheet_selection___amyloid,
+    runsheet_selection___tau, runsheet_selection___fdg
+  )) %>%
+  pivot_longer(
+    cols         = matches("runsheet_selection___|mc_calcdx_visit_"),
+    names_to     = c(".value", "modality"),
+    names_pattern = "(runsheet_selection___|mc_calcdx_visit_)(.*)"
+  ) %>%
+  rename(
+    runsheet_selection = runsheet_selection___,
+    visit_diagnosis    = mc_calcdx_visit_
+  ) %>%
+  mutate(
+    study_affiliation_fdg = recode(study_affiliation_fdg, "Imaging_Core" = "ADRC_IC")
+  ) %>%
+  mutate(
+    study_affiliation = case_when(
+      modality == "mri"     ~ study_affiliation_mri,
+      modality == "amyloid" ~ study_affiliation_amyloid,
+      modality == "tau"     ~ study_affiliation_tau,
+      modality == "fdg"     ~ study_affiliation_fdg
+    ),
+    scan_occur_confirmation = case_when(
+      modality == "mri"     ~ scan_occur_confirmation_mri,
+      modality == "amyloid" ~ scan_occur_confirmation_amyloid,
+      modality == "tau"     ~ scan_occur_confirmation_tau,
+      modality == "fdg"     ~ scan_occur_confirmation_fdg
+    ),
+    scan_date = case_when(
+      modality == "mri"     ~ mri_date,
+      modality == "amyloid" ~ amyloid_date,
+      modality == "tau"     ~ tau_date,
+      modality == "fdg"     ~ fdg_date
+    )
+  ) %>%
+  select(
+    global_id, ptid, modality, visit_diagnosis, runsheet_selection,
+    study_affiliation, scan_occur_confirmation, scan_date,
+    flair_sequence_scanned, t1_structural_sequence_scanned,
+    t2_structural_sequence_scanned, rsfmri_sequence_scanned,
+    dif_sequence_scanned
+  ) %>%
+  mutate(
+    visit_diagnosis = recode(
+      visit_diagnosis,
+      "1"  = "bvFTD", "3" = "MCI", "5" = "NC",
+      "6"  = "Lewy Body Dementia",
+      "10" = "Posterior Cortical Atrophy",
+      "11" = "ProgressiveSupranuclearPalsySyndrome",
+      "13" = "Amnestic Dementia",
+      "14" = "PPA", "16" = "Corticobasal Syndrome",
+      "21" = "Non-Amnestic Dementia",
+      "22" = "Impaired Not MCI"
+    )
+  ) %>%
+  filter(runsheet_selection == "1", !is.na(scan_date))
+
+df$scan_date <- as.Date(df$scan_date, format = "%Y-%m-%d")
+
+# ── Imaging Core Subsets ──────────────────────────────────────────────────────
+ic <- df %>%
+  filter(scan_occur_confirmation == "1" & study_affiliation == "ADRC_IC") %>%
+  select(-c(runsheet_selection, scan_occur_confirmation)) %>%
+  arrange(ptid, scan_date)
+
+ic_mri     <- ic %>% filter(modality == "mri")     %>% select(-modality) %>% arrange(ptid) %>% distinct(scan_date, .keep_all = TRUE)
+ic_amyloid <- ic %>% filter(modality == "amyloid") %>% select(-modality) %>% arrange(ptid) %>% distinct(scan_date, .keep_all = TRUE)
+ic_tau     <- ic %>% filter(modality == "tau")     %>% select(-modality) %>% arrange(ptid) %>% distinct(scan_date, .keep_all = TRUE)
+ic_fdg     <- ic %>% filter(modality == "fdg")     %>% select(-modality) %>% arrange(ptid) %>% distinct(scan_date, .keep_all = TRUE)
+
+# ── Reporting Period Subsets ──────────────────────────────────────────────────
+# Update the date ranges below to match your current RPPR and budget year windows.
+ic_rppr   <- ic %>% filter(scan_date >= "2025-02-01" & scan_date <= "2026-06-30")
+ic_budget <- ic %>% filter(scan_date >= "2025-07-01" & scan_date <= "2026-06-30")
+```
+
+This report summarizes imaging scan activity across all modalities (MRI, Amyloid PET, Tau PET, FDG PET) for the Imaging Core. It covers longitudinal totals, unique participant counts, diagnosis distributions, and progress within the current RPPR and budget year reporting windows.
+
+---
+
+### Overall Institute Imaging
+
+Total and unique scan counts across all modalities and studies throughout the history of the Institute.
+
+```{r mesulam-plot-1, fig.width=8, fig.height=6, echo=FALSE}
+ggplot(df, aes(factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+               fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(
+    title = "Overall Total Institute Scans By Modality",
+    x     = "Scan Modality", y = "Count", fill = "Modality"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+```{r mesulam-plot-2, fig.width=8, fig.height=6, echo=FALSE}
+df_unique <- df %>%
+  group_by(modality) %>%
+  distinct(ptid, .keep_all = TRUE)
+
+ggplot(df_unique, aes(factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                      fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(
+    title = "Overall Total Unique Institute Scans By Modality",
+    x     = "Scan Modality", y = "Count", fill = "Modality"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+MRI sequence counts during the grant period (7/1/21–5/31/25). Sequences: FLAIR, T1, T2, rsfMRI, dMRI.
+
+```{r mesulam-plot-3, fig.width=8, fig.height=6, echo=FALSE}
+grant_df <- df %>%
+  select(global_id, ptid, visit_diagnosis, study_affiliation, modality,
+         scan_date, flair_sequence_scanned, t1_structural_sequence_scanned,
+         t2_structural_sequence_scanned, rsfmri_sequence_scanned, dif_sequence_scanned) %>%
+  filter(modality == "mri", scan_date >= "2021-07-01", scan_date <= "2025-05-31")
+
+sequence_counts <- grant_df %>%
+  pivot_longer(cols = ends_with("_sequence_scanned"),
+               names_to = "sequence", values_to = "scanned") %>%
+  filter(scanned == "1") %>%
+  mutate(sequence = recode(sequence,
+    flair_sequence_scanned             = "FLAIR",
+    t1_structural_sequence_scanned     = "T1",
+    t2_structural_sequence_scanned     = "T2",
+    rsfmri_sequence_scanned            = "rsfMRI",
+    dif_sequence_scanned               = "dMRI"
+  )) %>%
+  count(sequence, name = "Count")
+
+ggplot(sequence_counts, aes(x = sequence, y = Count, fill = sequence)) +
+  geom_col(color = "black") +
+  geom_text(aes(label = Count), vjust = -0.5, color = "black", size = 6) +
+  scale_fill_manual(values = c(
+    "FLAIR" = "steelblue", "T1" = "#1b9e77", "T2" = "#d95f02",
+    "rsfMRI" = "#7570b3", "dMRI" = "#e7298a"
+  )) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.10))) +
+  labs(title = "Institute MRI Sequences Scanned\n(7/1/21–5/31/25)",
+       x = "Sequence Type", y = "Number of Scans") +
+  theme_bw(base_size = 16) +
+  theme(legend.position = "none")
+```
+
+```{r mesulam-plot-4, fig.width=12, fig.height=8, echo=FALSE}
+df <- df %>%
+  group_by(ptid) %>%
+  arrange(scan_date, .by_group = TRUE) %>%
+  mutate(first_scan = min(scan_date)) %>%
+  ungroup() %>%
+  mutate(ptid_ordered = forcats::fct_reorder(ptid, first_scan))
+
+ggplot(df, aes(x = scan_date, y = ptid_ordered,
+               col = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")))) +
+  geom_line(aes(group = ptid), alpha = 0.2, color = "gray") +
+  geom_point(aes(shape = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")))) +
+  annotate("rect",
+    xmin = as.Date("2025-01-01"), xmax = as.Date(Sys.Date()),
+    ymin = 0.5, ymax = length(levels(df$ptid_ordered)) + 0.5,
+    alpha = 0.2, fill = "gray80", color = NA_character_
+  ) +
+  labs(title = "Institute Scans By Modality Over Time",
+       x = "Year", y = "", col = "Modality", shape = "Modality") +
+  scale_color_manual(
+    name   = "Modality",
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("mri" = "MRI", "amyloid" = "Amyloid", "tau" = "Tau", "fdg" = "FDG")
+  ) +
+  scale_shape_manual(
+    name   = "Modality",
+    values = c("mri" = 16, "amyloid" = 17, "tau" = 15, "fdg" = 4),
+    labels = c("mri" = "MRI", "amyloid" = "Amyloid", "tau" = "Tau", "fdg" = "FDG")
+  ) +
+  scale_y_discrete(guide = "none") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white"),
+    panel.border     = element_rect(color = "black", fill = NA, linewidth = .5),
+    panel.grid       = element_blank(),
+    axis.text        = element_text(color = "black"),
+    axis.title       = element_text(color = "black"),
+    plot.title       = element_text(color = "black"),
+    axis.text.x      = element_text(angle = 45, vjust = 0.5),
+    text             = element_text(size = 18)
+  )
+```
+
+```{r mesulam-plot-5, fig.height=6, fig.width=6, echo=FALSE}
+ggplot(df, aes(x = scan_date, y = ptid,
+               col = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")))) +
+  geom_line(aes(group = ptid), alpha = 0.2, color = "gray") +
+  geom_point(aes(shape = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")))) +
+  labs(title = "Institute Imaging\nSnapshot In Past Year",
+       x = "Year", y = "", col = "Modality", shape = "Modality") +
+  coord_cartesian(xlim = c(as.Date("2025-01-01"), Sys.Date())) +
+  scale_color_manual(
+    name   = "Modality",
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG")
+  ) +
+  scale_shape_manual(
+    name   = "Modality",
+    values = c("mri" = 16, "amyloid" = 17, "tau" = 15, "fdg" = 4),
+    labels = c("MRI", "Amyloid", "Tau", "FDG")
+  ) +
+  scale_y_discrete(guide = "none") +
+  scale_x_date(date_breaks = "1 year", date_labels = "%Y") +
+  theme(
+    plot.background  = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white"),
+    panel.border     = element_rect(color = "black", fill = NA, linewidth = .5),
+    panel.grid       = element_blank(),
+    axis.text        = element_text(color = "black"),
+    axis.title       = element_text(color = "black"),
+    plot.title       = element_text(color = "black"),
+    axis.text.x      = element_text(angle = 45, vjust = 0.5),
+    text             = element_text(size = 16)
+  )
+```
+
+---
+
+### Imaging Core Scans
+
+Longitudinal and unique scan counts for Imaging Core participants since inception (2018–present).
+
+```{r ic-plot-1, fig.width=8, fig.height=6, echo=FALSE}
+ggplot(ic, aes(x = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+               fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(title = "Total Longitudinal Imaging Core Scans By Modality\n(2018–Present)",
+       x = "Scan Modality", y = "Count", fill = "Modality") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+**Table 1:**
+
+```{r ic-table-1, echo=FALSE}
+ic %>%
+  ungroup() %>%
+  select(modality) %>%
+  mutate(modality = str_trim(tolower(modality))) %>%
+  group_by(modality) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(modality = case_match(modality,
+    "mri" ~ "MRI", "amyloid" ~ "Amyloid", "tau" ~ "Tau", "fdg" ~ "FDG",
+    .default = modality)) %>%
+  mutate(modality = factor(modality, levels = c("MRI", "Amyloid", "Tau", "FDG"))) %>%
+  arrange(modality) %>%
+  bind_rows(summarise(., modality = "Total", count = sum(count))) %>%
+  gt() %>%
+  cols_label(modality = "MODALITY", count = "COUNT") %>%
+  tab_header(title = "Total Longitudinal Imaging Core Scans by Modality") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = modality == "Total"))
+```
+
+```{r ic-plot-2, fig.width=8, fig.height=6, echo=FALSE}
+ic_unique <- ic %>%
+  group_by(modality) %>%
+  arrange(desc(scan_date)) %>%
+  distinct(ptid, .keep_all = TRUE)
+
+ggplot(ic_unique, aes(x = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                      fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(title = "Total Unique Imaging Core Scans By Modality\n(2018–Present)",
+       x = "Scan Modality", y = "Count", fill = "Modality") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+**Table 2:**
+
+```{r ic-table-2, echo=FALSE}
+ic %>%
+  ungroup() %>%
+  distinct(global_id, modality, .keep_all = TRUE) %>%
+  select(modality) %>%
+  mutate(modality = str_trim(tolower(modality))) %>%
+  group_by(modality) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(modality = case_match(modality,
+    "mri" ~ "MRI", "amyloid" ~ "Amyloid", "tau" ~ "Tau", "fdg" ~ "FDG",
+    .default = modality)) %>%
+  mutate(modality = factor(modality, levels = c("MRI", "Amyloid", "Tau", "FDG"))) %>%
+  arrange(modality) %>%
+  bind_rows(summarise(., modality = "Total", count = sum(count))) %>%
+  gt() %>%
+  cols_label(modality = "MODALITY", count = "COUNT") %>%
+  tab_header(title = "Total Unique Imaging Core Scans by Modality") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = modality == "Total"))
+```
+
+```{r ic-plot-3, fig.width=12, fig.height=6, echo=FALSE}
+ggplot(ic, aes(y = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+               fill = visit_diagnosis)) +
+  geom_bar(position = "stack", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)), color = "black",
+            position = position_stack(vjust = 0.5), size = 4) +
+  labs(title = "Total Longitudinal Imaging Core Scans By Diagnosis At Scan\n(2018–Present)",
+       y = "Scan Modality", x = "Count", fill = "Diagnosis at Scan") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_y_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  theme_bw(base_size = 16)
+```
+
+**Table 3:**
+
+```{r ic-table-3, echo=FALSE}
+cross_tab_raw <- table(ic$modality, ic$visit_diagnosis)
+cross_tab_df  <- as.data.frame.matrix(cross_tab_raw) %>%
+  tibble::rownames_to_column(var = "Modality") %>%
+  mutate(Total = rowSums(across(-Modality)))
+diagnosis_cols <- setdiff(names(cross_tab_df), c("Modality", "Total"))
+total_row <- cross_tab_df %>%
+  summarise(across(-Modality, sum)) %>%
+  mutate(Modality = "Total") %>%
+  select(Modality, everything())
+cross_tab_df <- bind_rows(cross_tab_df, total_row)
+
+cross_tab_df %>%
+  gt(rowname_col = "Modality") %>%
+  tab_stubhead(label = "Modality") %>%
+  tab_header(
+    title    = md("**Cross-Tabulation of Modality and Scan Visit Diagnosis**"),
+    subtitle = "Counts of individuals by scan modality and scan visit diagnosis"
+  ) %>%
+  tab_spanner(label = "Diagnosis At Scan", columns = all_of(diagnosis_cols)) %>%
+  fmt_number(columns = -Modality, decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = Modality == "Total")) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = Total))
+```
+
+```{r ic-plot-4, fig.width=12, fig.height=6, echo=FALSE}
+ggplot(ic_unique, aes(y = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                      fill = visit_diagnosis)) +
+  geom_bar(position = "stack", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)), color = "black",
+            position = position_stack(vjust = 0.5), size = 4) +
+  labs(title = "Total Unique Imaging Core Scans By Diagnosis At Scan\n(2018–Present)",
+       y = "Scan Modality", x = "Count", fill = "Diagnosis At Scan") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_y_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  theme_bw(base_size = 16)
+```
+
+**Table 4:**
+
+```{r ic-table-4, echo=FALSE}
+cross_tab_raw <- table(ic_unique$modality, ic_unique$visit_diagnosis)
+cross_tab_df  <- as.data.frame.matrix(cross_tab_raw) %>%
+  tibble::rownames_to_column(var = "Modality") %>%
+  mutate(Total = rowSums(across(-Modality)))
+diagnosis_cols <- setdiff(names(cross_tab_df), c("Modality", "Total"))
+total_row <- cross_tab_df %>%
+  summarise(across(!c(Modality, Total), sum)) %>%
+  mutate(Modality = "Total", Total = sum(cross_tab_df$Total)) %>%
+  select(Modality, everything())
+cross_tab_df <- bind_rows(cross_tab_df, total_row)
+
+cross_tab_df %>%
+  gt(rowname_col = "Modality") %>%
+  tab_header(
+    title    = md("**Cross-Tabulation of Unique Modality and Scan Visit Diagnosis**"),
+    subtitle = "Counts of unique individuals by scan modality and scan visit diagnosis"
+  ) %>%
+  tab_stubhead(label = "Modality") %>%
+  tab_spanner(label = "Diagnosis At Scan", columns = all_of(diagnosis_cols)) %>%
+  fmt_number(columns = -Modality, decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = Modality == "Total")) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = Total))
+```
+
+---
+
+#### IC RPPR Year (2/1/25–6/30/26)
+
+```{r ic-plot-5, fig.width=8, fig.height=6, echo=FALSE}
+ggplot(ic_rppr, aes(x = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                    fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(title = "Imaging Core Scans By Modality\nFor RPPR Year (2/1/25–6/30/26)",
+       x = "Scan Modality", y = "Count", fill = "Modality") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+**Table 5:**
+
+```{r ic-table-5, echo=FALSE}
+ic_rppr %>%
+  ungroup() %>%
+  distinct(global_id, modality, .keep_all = TRUE) %>%
+  select(modality) %>%
+  mutate(modality = str_trim(tolower(modality))) %>%
+  group_by(modality) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(modality = case_match(modality,
+    "mri" ~ "MRI", "amyloid" ~ "Amyloid", "tau" ~ "Tau", "fdg" ~ "FDG",
+    .default = modality)) %>%
+  mutate(modality = factor(modality, levels = c("MRI", "Amyloid", "Tau", "FDG"))) %>%
+  arrange(modality) %>%
+  bind_rows(summarise(., modality = "Total", count = sum(count))) %>%
+  gt() %>%
+  cols_label(modality = "MODALITY", count = "COUNT") %>%
+  tab_header(title = "Imaging Core Scans for RPPR Year") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = modality == "Total"))
+```
+
+```{r ic-plot-6, fig.width=8, fig.height=6, echo=FALSE}
+ggplot(ic_rppr, aes(y = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                    fill = visit_diagnosis)) +
+  geom_bar(position = "stack", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)), color = "black",
+            position = position_stack(vjust = 0.5), size = 6) +
+  labs(title = "Imaging Core Scans By Diagnosis At Scan\nFor RPPR (2/1/25–6/30/26)",
+       y = "Scan Modality", x = "Count", fill = "Diagnosis At Scan") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_y_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  theme_bw(base_size = 16)
+```
+
+**Table 6:**
+
+```{r ic-table-6, echo=FALSE}
+cross_tab_raw <- table(ic_rppr$modality, ic_rppr$visit_diagnosis)
+cross_tab_df  <- as.data.frame.matrix(cross_tab_raw) %>%
+  tibble::rownames_to_column(var = "Modality") %>%
+  mutate(Total = rowSums(across(-Modality)))
+diagnosis_cols <- setdiff(names(cross_tab_df), c("Modality", "Total"))
+total_row <- cross_tab_df %>%
+  summarise(across(!c(Modality, Total), sum)) %>%
+  mutate(Modality = "Total", Total = sum(cross_tab_df$Total)) %>%
+  select(Modality, everything())
+cross_tab_df <- bind_rows(cross_tab_df, total_row)
+
+cross_tab_df %>%
+  gt(rowname_col = "Modality") %>%
+  tab_header(
+    title    = md("**Cross-Tabulation of Modality and Scan Visit Diagnosis (RPPR)**"),
+    subtitle = "Counts by scan modality and visit diagnosis for RPPR period"
+  ) %>%
+  tab_stubhead(label = "Modality") %>%
+  tab_spanner(label = "Diagnosis At Scan", columns = all_of(diagnosis_cols)) %>%
+  fmt_number(columns = -Modality, decimals = 0) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = Modality == "Total")) %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(columns = Total))
+```
+
+---
+
+#### IC Budget Year (7/1/25–6/30/26)
+
+```{r ic-plot-7, fig.width=8, fig.height=6, echo=FALSE}
+ggplot(ic_budget, aes(x = factor(modality, levels = c("mri", "amyloid", "tau", "fdg")),
+                      fill = modality)) +
+  geom_bar(position = "identity", color = "black") +
+  geom_text(stat = "count", aes(label = after_stat(count)),
+            vjust = -0.5, color = "black", size = 6) +
+  labs(title = "Imaging Core Scans For\nBudget Year (7/1/25–6/30/26)",
+       x = "Scan Modality", y = "Count", fill = "Modality") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  scale_x_discrete(labels = c("mri" = "MRI", "amyloid" = "Amyloid",
+                               "tau" = "Tau", "fdg" = "FDG")) +
+  scale_fill_manual(
+    values = c("mri" = "#1b9e77", "amyloid" = "#d95f02",
+               "tau" = "#7570b3", "fdg"     = "#e7298a"),
+    labels = c("MRI", "Amyloid", "Tau", "FDG"),
+    limits = c("mri", "amyloid", "tau", "fdg")
+  ) +
+  theme_bw(base_size = 16)
+```
+
+**Table 7:**
+
+```{r ic-table-7, echo=FALSE}
+ic_budget %>%
+  ungroup() %>%
+  distinct(global_id, modality, .keep_all = TRUE) %>%
+  select(modality) %>%
+  mutate(modality = str_trim(tolower(modality))) %>%
+  group_by(modality) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  mutate(modality = case_match(modality,
+    "mri" ~ "MRI", "amyloid" ~ "Amyloid", "tau" ~ "Tau", "fdg" ~ "FDG",
+    .default = modality)) %>%
+  mutate(modality = factor(modality, levels = c("MRI", "Amyloid", "Tau", "FDG"))) %>%
+  arrange(modality) %>%
+  bind_rows(summarise(., modality = "Total", count = sum(count))) %>%
+  gt() %>%
+  cols_label(modality = "MODALITY", count = "COUNT") %>%
+  tab_header(title = "Imaging Core Scans for Budget Year") %>%
+  tab_style(style = cell_text(weight = "bold"),
+            locations = cells_body(rows = modality == "Total"))
+```
