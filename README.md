@@ -12,6 +12,8 @@ Clinical research R scripts developed during my role as Clinical Research Coordi
 professional-nu-reports/
 ├── amyloid_pet/
 │   └── amyloid_reads.R          # Amyloid PET visual/SUVr discrepancy analysis
+├── imaging_dashboard/
+│   └── README.md                # In-development R Shiny dashboard (placeholder)
 ├── imaging_report/
 │   ├── imaging_report.Rmd       # Automated HTML imaging report (R Markdown)
 │   ├── run_imaging_report.R     # Script to render the report programmatically
@@ -38,6 +40,11 @@ Parameterized R Markdown report that generates an HTML dashboard of Imaging Core
 
 ---
 
+### `imaging_dashboard/` (In development)
+An interactive R Shiny dashboard planned a companion to `imaging_report.Rmd`. Will provide real-time participant eligibility tracking and expanded scan metrics for day-to-day Imaging Core monitoring. See the [dashboard README.md](imaging_dashboard/README.md) for full details on planned features and scope.
+
+---
+
 ### `imaging_report/run_imaging_report.R`
 Wrapper script that renders `imaging_report.Rmd` programmatically using `rmarkdown::render()`, with error handling and logging.
 
@@ -59,7 +66,7 @@ R Markdown report analyzing Tau PET read concordance across researcher and clini
 
 These scripts authenticate to REDCap via API tokens. Tokens are **never** stored in this repository.
 
-### Local credentials file (recommended for local use)
+### Option A — Local credentials file (recommended for local use)
 
 Create a file called `redcap_api_info.R` in your working directory (it is listed in `.gitignore` and will never be committed):
 
@@ -75,6 +82,22 @@ uds4_token     <- "YOUR_UDS4_REDCAP_TOKEN"
 Then source it at the top of each script:
 ```r
 source("redcap_api_info.R")
+```
+
+### Option B — Environment variables (recommended for servers/cron)
+
+Add the following to your `~/.Renviron` file:
+
+```
+REDCAP_URL=https://redcap.yourInstitution.edu/api/
+REDCAP_IMAGING_TOKEN=your_token_here
+REDCAP_DR_TOKEN=your_token_here
+```
+
+Then read them in R:
+```r
+url           <- Sys.getenv("REDCAP_URL")
+imaging_token <- Sys.getenv("REDCAP_IMAGING_TOKEN")
 ```
 
 ---
