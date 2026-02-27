@@ -59,7 +59,7 @@ R Markdown report analyzing Tau PET read concordance across researcher and clini
 
 These scripts authenticate to REDCap via API tokens. Tokens are **never** stored in this repository.
 
-### Option A — Local credentials file (recommended for local use)
+### Local credentials file (recommended for local use)
 
 Create a file called `redcap_api_info.R` in your working directory (it is listed in `.gitignore` and will never be committed):
 
