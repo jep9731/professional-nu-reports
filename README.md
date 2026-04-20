@@ -1,6 +1,6 @@
 # Northwestern University — Neuroimaging Analytics Pipeline
 
-Clinical research R scripts developed during my role as Clinical Research Coordinator at the Northwestern University Mesulam Center for Cognitive Neurology and Alzheimer's Disease. These scripts support multi-modal PET/MRI imaging data management, quality control, and automated reporting for the Imaging Core.
+Clinical research R & Python scripts developed during my role as Clinical Research Coordinator at the Northwestern University Mesulam Center for Cognitive Neurology and Alzheimer's Disease. These scripts support multi-modal PET/MRI imaging data management, quality control, and automated reporting for the Imaging Core.
 
 > **Note:** All scripts connect to internal REDCap databases and institutional file systems. No data, credentials, or PHI are included in this repository. See [Credential Setup](#credential-setup) below before running.
 
